@@ -1,0 +1,23 @@
+# Model readiness
+
+This is an optional legacy training/evaluation pipeline. Runtime expected-production prediction uses pvlib PVWatts in all simulation and weather-analysis paths; the saved artifact is not loaded for inference. The runtime requirements do not include scikit-learn, joblib, or XGBoost. Install `backend/requirements-ml.txt` only to train or inspect artifacts.
+
+The project trains on the four local files under `dataset/`. In the source Kaggle dataset, `AC_POWER` and `DC_POWER` are inverter power readings in kW at 15-minute sampling intervals; `DAILY_YIELD` and `TOTAL_YIELD` are energy counters. Training sums inverter `AC_POWER` by plant and timestamp, so its target is plant AC power in kW, not kWh. It joins weather sensor rows by plant/time and uses irradiation, ambient/module temperatures, hour cycles, and annual day cycles as features. See the [Kaggle dataset description](https://www.kaggle.com/datasets/anikannal/solar-power-generation-data).
+
+The training target is divided by each plant's training-period peak AC power to form a dimensionless normalized output. That scale and saved estimator are retained only for training artifact evaluation; runtime predictions use the independent pvlib model described in [PREDICTION_MODEL.md](PREDICTION_MODEL.md). The source files provide no certified plant nameplate capacities. Splits are chronological 70/15/15; model selection uses validation MAE, and test metrics use a held-out final time segment.
+
+The current run matched 6,416 plant intervals from 136,476 generation rows, with 4,460 train, 978 validation, and 978 test intervals. Random Forest was selected using validation MAE. Held-out test MAE was 0.0213, RMSE 0.0553, and R² 0.9517 in normalized output units. Linear Regression was also evaluated. XGBoost was skipped on this Mac because its OpenMP runtime (`libomp`) is unavailable; the skip is recorded with model metadata.
+
+Artifacts are saved as `backend/ml/artifacts/solar_output.joblib` and `solar_output.json`, including source filenames, counts, date range, split definition, comparisons, and test metrics. Simulated inverter records are excluded from measured training targets. The OEDI PVDAQ acquisition remains separate and currently fetches only a bounded metadata sample.
+
+## Prediction provenance and interval units
+
+Weather-aligned analysis and all virtual simulation routes call the same pvlib prediction service. Predictions are stamped with `pvlib_pvwatts` and pipeline version `pvlib-pvwatts-v1`; `model_version` is null because no ML artifact participates in runtime inference.
+
+Manual and CSV interval-energy readings (`kWh`) are preserved as entered and are never multiplied by duration a second time. Their expected output is calculated as predicted power (`kW`) × duration in hours; classification compares expected and actual average power over that same interval. CSV may explicitly provide interval-average power with `interval_average_power_kw`; that value is converted once to energy. A plain `power_kw` or Kaggle `AC_POWER` sample stays power-only because a timestamp cadence does not prove it represents an interval average. Kaggle `AC_POWER` rows are summed across inverters by plant and timestamp, matching training; the summed sample is not converted to energy without explicit interval-average semantics. `interval_minutes` or `duration_minutes` may report sampling cadence; otherwise the median positive timestamp spacing (up to 24 hours) is recorded, with a 60-minute default when it cannot be inferred. Naive timestamps are interpreted in the installation timezone.
+
+Virtual inverter runs obtain the model baseline first, apply scenario loss only to simulated actual average power, then calculate expected and actual interval energy using the explicitly selected simulation duration. Its weather timestamp is either Open-Meteo current time or an explicitly requested simulation timestamp resolved against hourly weather. Repeated identical runs at the same installation/time/duration/scenario are idempotent.
+
+Historical weather lookup uses the installation timezone and selects the closest hourly weather sample to the recorded timestamp, with a maximum 30-minute offset. The selected weather timestamp and source are kept on each analyzed observation. Existing legacy values and units are not rewritten: kWh records with a saved duration gain equivalent canonical fields, while old kW samples retain power fields and are flagged for missing interval duration. Legacy fields whose unit is unknown are flagged for review.
+
+Resetting production history deletes only observation rows. It does not alter trained model files, model metadata, or training metrics.
